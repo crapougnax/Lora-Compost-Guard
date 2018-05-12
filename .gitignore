@@ -54,3 +54,4 @@ dkms.conf
 # Project specifics
 sketch/*.h
 
+.vscode/

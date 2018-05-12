@@ -1,3 +1,4 @@
+#include <DHTesp.h>
 #include <OneWire.h>
 #include <U8x8lib.h>
 #include <lmic.h>
@@ -12,16 +13,20 @@
 CayenneLPP lpp(51);
 
 /* 1-Wire Pin for DS18B20 */
-const byte BROCHE_ONEWIRE = 2;
+const byte ONEWIRE_PIN = 2;
+
+/** Pin number for DHT11 data pin */
+int dhtPin = 17;
+DHTesp dht;
 
 /* Analog pin for FC28 */
-int analogpin_FC28 = 13;
+int analogpin_FC28 = 36;
 
 /* FC28 minimal value = 0% */
-int maxValue = 5980;
+int maxValue = 1023;
 
 /* FC28 maximal value = 100% */
-int minValue = 1600;
+int minValue = 18;
 
 
 /* Return codes for the getTemperature() function */
@@ -33,40 +38,26 @@ enum DS18B20_RCODES {
 };
 
 /* OneWire object creation */
-OneWire ds(BROCHE_ONEWIRE);
+OneWire ds(ONEWIRE_PIN);
 
 /* OLED Screen */
 U8X8_SSD1306_128X64_NONAME_SW_I2C u8x8(/* clock=*/ 15, /* data=*/ 4, /* reset=*/ 16);
-
-// These callbacks are only used in over-the-air activation, so they are
-// left empty here (we cannot leave them out completely unless
-// DISABLE_JOIN is set in config.h, otherwise the linker will complain).
-void os_getArtEui (u1_t* buf) { }
-void os_getDevEui (u1_t* buf) { }
-void os_getDevKey (u1_t* buf) { }
-
-static osjob_t sendjob;
-
-// Schedule TX every this many seconds (might become longer due to duty cycle limitations).
-const unsigned TX_INTERVAL = 300;
-
-// Pin mapping
-const lmic_pinmap lmic_pins = {
-  .nss = 18,
-  .rxtx = LMIC_UNUSED_PIN,
-  .rst = 14,
-  .dio = {26, 33, 32},
-};
 
 void setup() {
   
   Serial.begin(115200);
 
+  dht.setup(dhtPin, DHTesp::DHT11);
+
+  pinMode(analogpin_FC28, INPUT);
+
   u8x8.begin();
   u8x8.setFont(u8x8_font_chroma48medium8_r);
-  u8x8.drawString(0, 1, "Mon Composteur");
-  u8x8.drawString(0, 3, "Temperature:");
-  u8x8.drawString(0, 4, "Humidite:");
+  u8x8.drawString(0, 0, "CompostGuard 1.0");
+  
+  u8x8.drawString(0, 2, "      Soil  Air");
+  u8x8.drawString(0, 3, "T C   --.-  --.-");
+  u8x8.drawString(0, 4, "H %   ---   ---");
 
   SPI.begin(5, 19, 27);
 
@@ -122,29 +113,49 @@ void setup() {
 void loop() {
   float temperature;
   char buffer[20];
+  
+  TempAndHumidity newValues = dht.getTempAndHumidity();
+  
+  // Check if any reads failed and exit early (to try again).
+  if (dht.getStatus() != 0) {
+    Serial.println("DHT11 error status: " + String(dht.getStatusString()));
+  }
+  
+  sprintf(buffer, "%3.1f", newValues.temperature);
+  u8x8.drawString(12, 3, buffer);
 
-  /* Lit la température ambiante à ~1Hz */
+  sprintf(buffer, "%3.0f", newValues.humidity);
+  u8x8.drawString(12, 4, buffer);
+
+  // Read Soil temperature
   if (getTemperature(&temperature, true) != READ_OK) {
     Serial.println(F("Erreur de lecture du capteur"));
     return;
   }
 
   sprintf(buffer, "%3.1f", temperature); // conversion float en char
-  u8x8.drawString(10, 3, strcat(buffer,"C"));
+  u8x8.drawString(6, 3, buffer);
 
   //Lecture de la valeur
-  int sensorValue = analogRead(analogpin_FC28);
-  sensorValue = constrain(sensorValue, minValue, maxValue);  
-  // Calcule en pourcentage
+  analogReadResolution(10);
+  int sensorValue = constrain(analogRead(analogpin_FC28), minValue, maxValue);  
+  // Map to % value
   int soil = map(sensorValue, minValue, maxValue, 100, 0);
-  sprintf(buffer, "%0d", soil); // conversion float en char
-  u8x8.drawString(11, 4, strcat(buffer, "%"));
+  sprintf(buffer, "%3d", soil);
+  u8x8.drawString(6, 4, buffer);
 
 
+  // Prepare payload
   lpp.reset();
+
+  // Soil
   lpp.addTemperature(1, temperature);
   lpp.addRelativeHumidity(2, soil);
 
+  // Air
+  lpp.addTemperature(3, newValues.temperature);
+  lpp.addRelativeHumidity(4, newValues.humidity);
+  
   os_runloop_once();
 
   delay(5000);
@@ -207,56 +218,58 @@ byte getTemperature(float *temperature, byte reset_search) {
 
 void onEvent (ev_t ev) {
     Serial.print(os_getTime());
-    u8x8.setCursor(0, 5);
+    u8x8.setCursor(0, 6);
     u8x8.printf("TIME %lu", os_getTime());
     Serial.print(": ");
+    u8x8.setCursor(0, 7);
     switch(ev) {
         case EV_SCAN_TIMEOUT:
             Serial.println(F("EV_SCAN_TIMEOUT"));
-            u8x8.drawString(0, 7, "EV_SCAN_TIMEOUT");
+            u8x8.print("EV_SCAN_TIMEOUT");
             break;
         case EV_BEACON_FOUND:
             Serial.println(F("EV_BEACON_FOUND"));
-            u8x8.drawString(0, 7, "EV_BEACON_FOUND");
+            u8x8.print("EV_BEACON_FOUND");
             break;
         case EV_BEACON_MISSED:
             Serial.println(F("EV_BEACON_MISSED"));
-            u8x8.drawString(0, 7, "EV_BEACON_MISSED");
+            u8x8.print("EV_BEACON_MISSED");
             break;
         case EV_BEACON_TRACKED:
             Serial.println(F("EV_BEACON_TRACKED"));
-            u8x8.drawString(0, 7, "EV_BEACON_TRACKED");
+            u8x8.print("EV_BEACON_TRACKED");
             break;
         case EV_JOINING:
             Serial.println(F("EV_JOINING"));
-            u8x8.drawString(0, 7, "EV_JOINING");
+            u8x8.print("EV_JOINING");
             break;
         case EV_JOINED:
             Serial.println(F("EV_JOINED"));
-            u8x8.drawString(0, 7, "EV_JOINED ");
+            u8x8.print("EV_JOINED ");
             // Disable link check validation (automatically enabled
             // during join, but not supported by TTN at this time).
             LMIC_setLinkCheckMode(0);
             break;
         case EV_RFU1:
             Serial.println(F("EV_RFU1"));
-            u8x8.drawString(0, 7, "EV_RFUI");
+            u8x8.print("EV_RFUI");
             break;
         case EV_JOIN_FAILED:
             Serial.println(F("EV_JOIN_FAILED"));
-            u8x8.drawString(0, 7, "EV_JOIN_FAILED");
+            u8x8.print("EV_JOIN_FAILED");
             break;
         case EV_REJOIN_FAILED:
             Serial.println(F("EV_REJOIN_FAILED"));
-            u8x8.drawString(0, 7, "EV_REJOIN_FAILED");
+            u8x8.print("EV_REJOIN_FAILED");
             break;
         case EV_TXCOMPLETE:
             Serial.println(F("EV_TXCOMPLETE (includes waiting for RX windows)"));
-            u8x8.drawString(0, 7, "EV_TXCOMPLETE");
+            u8x8.print("EV_TXCOMPLETE");
             digitalWrite(BUILTIN_LED, LOW);
             if (LMIC.txrxFlags & TXRX_ACK)
               Serial.println(F("Received ack"));
-              u8x8.drawString(0, 7, "Received ACK");
+              u8x8.setCursor(0, 7);
+              u8x8.print("Received ACK");
             if (LMIC.dataLen) {
               Serial.println(F("Received "));
               u8x8.drawString(0, 6, "RX ");
@@ -272,24 +285,24 @@ void onEvent (ev_t ev) {
             break;
         case EV_LOST_TSYNC:
             Serial.println(F("EV_LOST_TSYNC"));
-            u8x8.drawString(0, 7, "EV_LOST_TSYNC");
+            u8x8.print("EV_LOST_TSYNC");
             break;
         case EV_RESET:
             Serial.println(F("EV_RESET"));
-            u8x8.drawString(0, 7, "EV_RESET");
+            u8x8.print("EV_RESET");
             break;
         case EV_RXCOMPLETE:
             // data received in ping slot
             Serial.println(F("EV_RXCOMPLETE"));
-            u8x8.drawString(0, 7, "EV_RXCOMPLETE");
+            u8x8.print("EV_RXCOMPLETE");
             break;
         case EV_LINK_DEAD:
             Serial.println(F("EV_LINK_DEAD"));
-            u8x8.drawString(0, 7, "EV_LINK_DEAD");
+            u8x8.print("EV_LINK_DEAD");
             break;
         case EV_LINK_ALIVE:
             Serial.println(F("EV_LINK_ALIVE"));
-            u8x8.drawString(0, 7, "EV_LINK_ALIVE");
+            u8x8.print("EV_LINK_ALIVE");
             break;
          default:
             Serial.println(F("Unknown event"));
@@ -299,16 +312,17 @@ void onEvent (ev_t ev) {
     }
 }
 
-void do_send(osjob_t* j){
+void do_send(osjob_t* j) {
+    u8x8.setCursor(0, 7);
     // Check if there is not a current TX/RX job running
     if (LMIC.opmode & OP_TXRXPEND) {
         Serial.println(F("OP_TXRXPEND, not sending"));
-        u8x8.drawString(0, 7, "OP_TXRXPEND, not sent");
+        u8x8.print("OP_TXRXPEND, not sent");
     } else {
         // Prepare upstream data transmission at the next possible time.
         LMIC_setTxData2(1, lpp.getBuffer(), lpp.getSize(), 0);
         Serial.println(F("Packet queued"));
-        u8x8.drawString(0, 7, "PACKET QUEUED");
+        u8x8.print("PACKET QUEUED");
     }
     // Next TX is scheduled after TX_COMPLETE event.
 }
